@@ -35,4 +35,6 @@ pytest-asyncio>=0.23.0
 ## 
 redis
 python-dotenv
-pymongo[srv]==3.12
+# Database
+motor>=3.6.0          # Updated to match latest stable
+pymongo[srv]>=4.9.0   # Matches Motor 3.6+ requirements
