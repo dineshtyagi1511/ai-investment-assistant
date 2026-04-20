@@ -1,0 +1,46 @@
+Here's the complete file list in creation order — create them exactly in this sequence because each file depends on the ones before it:
+Step 1 — Root files (create these first)
+aira/
+├── .env                   ← your API keys go here, never commit to git
+├── requirements.txt       ← all pip dependencies
+├── Dockerfile             ← container build instructions
+└── docker-compose.yml     ← spins up app + MongoDB + Redis together
+Step 2 — app/core/ (config before everything else)
+app/core/
+├── __init__.py
+├── config.py              ← Settings class, LiteLLM setup, all env vars
+└── guardrails.py          ← safety rules, PII redaction, disclaimer
+Step 3 — app/schemas/ (Pydantic models — the source of truth)
+app/schemas/
+├── __init__.py
+└── analysis.py            ← StockAnalysis, FinancialMetric, NewsReference, ComparisonAnalysis
+Step 4 — app/db/ (database layer)
+app/db/
+├── __init__.py
+└── mongo.py               ← MongoDB connector, TTL indexes, save/fetch helpers
+Step 5 — app/services/ (the engine — build in this order)
+app/services/
+├── __init__.py
+├── llm_router.py          ← build FIRST: classify_query + route_completion
+├── data_ingestion.py      ← Alpha Vantage client, News API client
+├── rag_engine.py          ← ChromaDB VectorStore + BGE reranker + HyDE
+└── cache.py               ← Redis semantic cache (needs sentence-transformers)
+Step 6 — app/agents/ (AI logic — depends on all services)
+app/agents/
+├── __init__.py
+├── analyst.py             ← main pipeline: cache → data → RAG → LLM → guardrails
+└── debate.py              ← Bull agent + Bear agent + Synthesizer agent
+Step 7 — app/api/ and app/main.py (wire everything together last)
+app/api/
+├── __init__.py
+└── routes.py              ← all FastAPI endpoints (/analyze, /compare, /quote, /news)
+
+app/main.py                ← FastAPI app, CORS, lifespan, MongoDB connect on startup
+Step 8 — tests/
+tests/
+├── __init__.py
+└── test_aira.py           ← schema validation, router, guardrails, chunker tests
+Step 9 — data/ folders (empty, just need to exist)
+data/raw/                  ← drop PDF annual reports here to index into RAG
+data/processed/            ← chunked/cleaned versions land here
+Click any file in the diagram to get its full code pasted into the chat. The build order matters — if you create analyst.py before llm_router.py, the imports will fail immediately.

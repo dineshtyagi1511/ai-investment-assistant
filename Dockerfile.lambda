@@ -1,0 +1,30 @@
+# AWS Lambda container image using Lambda Web Adapter
+# This lets FastAPI run on Lambda without changing any app code.
+# The adapter translates Lambda invocation events into HTTP requests.
+
+FROM public.ecr.aws/lambda/python:3.11
+
+# Install Lambda Web Adapter — the bridge between Lambda and FastAPI
+COPY --from=public.ecr.aws/awsguru/aws-lambda-adapter:0.8.1 \
+     /lambda-adapter /opt/extensions/lambda-adapter
+
+# Tell the adapter where FastAPI is listening
+ENV PORT=8000
+ENV AWS_LAMBDA_EXEC_WRAPPER=/opt/extensions/lambda-adapter
+
+WORKDIR /var/task
+
+# System deps for sentence-transformers (BGE reranker)
+RUN yum install -y gcc gcc-c++ && yum clean all
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY app/ ./app/
+COPY data/ ./data/
+
+# Lambda handler — points at the FastAPI app via the adapter
+# The adapter intercepts this and forwards HTTP to uvicorn instead
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
