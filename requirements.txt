@@ -35,3 +35,4 @@ pytest-asyncio>=0.23.0
 ## 
 redis
 python-dotenv
+pymongo[srv]==3.12

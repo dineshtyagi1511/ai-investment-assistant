@@ -7,24 +7,20 @@ on:
     branches: [main]
 
 env:
-  AWS_REGION: ap-south-1          # Mumbai — closest to India
+  AWS_REGION: ap-south-1
   ECR_REPOSITORY: aira-api
   LAMBDA_FUNCTION: aira-api
   IMAGE_TAG: ${{ github.sha }}
 
 jobs:
-
-  # ── Job 1: Test ─────────────────────────────────────────────────────────────
+  # ── Job 1: Run Tests ─────────────────────────────────────────
   test:
     name: Run test suite
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
@@ -32,166 +28,134 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run schema + unit tests
+      - name: Run tests
         run: pytest tests/ -v --tb=short
         env:
-          # Dummy values so config.py doesn't fail on import during tests
-          OPENAI_API_KEY: sk-test-dummy
-          ALPHA_VANTAGE_API_KEY: test
-          NEWS_API_KEY: test
+          OPENAI_API_KEY: dummy
+          ALPHA_VANTAGE_API_KEY: dummy
+          NEWS_API_KEY: dummy
           MONGO_URI: mongodb://localhost:27017
           REDIS_URL: redis://localhost:6379
 
-      - name: Validate Pydantic schemas
-        run: |
-          python -c "
-          from app.schemas.analysis import StockAnalysis, ComparisonAnalysis, NewsDigest
-          print('Schemas OK')
-          "
-        env:
-          OPENAI_API_KEY: sk-test-dummy
-          ALPHA_VANTAGE_API_KEY: test
-          NEWS_API_KEY: test
-
-  # ── Job 2: Build & Push to ECR ──────────────────────────────────────────────
+  # ── Job 2: Build & Push Docker Image ─────────────────────────
   build:
-    name: Build Docker image and push to ECR
+    name: Build and Push to ECR
     runs-on: ubuntu-latest
-    needs: test                   # only runs if tests pass
-    if: github.ref == 'refs/heads/main'   # only on main branch, not PRs
-
+    needs: test
+    if: github.ref == 'refs/heads/main'
     outputs:
-      image_uri: ${{ steps.build-push.outputs.image_uri }}
-
+      image_uri: ${{ steps.build.outputs.image_uri }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ env.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build, tag, and push image to ECR
-        id: build-push
+      - name: Build and Push Image
+        id: build
         env:
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
           IMAGE_URI=$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-
+          
           docker build \
             --platform linux/amd64 \
-            --build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
-            --build-arg GIT_SHA=$IMAGE_TAG \
+            --cache-from $REGISTRY/$ECR_REPOSITORY:latest \
             -t $IMAGE_URI \
             -f Dockerfile.lambda \
             .
-
+          
           docker push $IMAGE_URI
-
-          # Also tag as latest for easy rollback reference
+          
+          # Tag and push as latest
           docker tag $IMAGE_URI $REGISTRY/$ECR_REPOSITORY:latest
           docker push $REGISTRY/$ECR_REPOSITORY:latest
-
+          
           echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
 
-  # ── Job 3: Deploy to Lambda ──────────────────────────────────────────────────
+  # ── Job 3: Deploy to Lambda ─────────────────────────────────
   deploy:
     name: Deploy to AWS Lambda
     runs-on: ubuntu-latest
     needs: build
     if: github.ref == 'refs/heads/main'
-
     steps:
-      - name: Configure AWS credentials
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ env.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Update Lambda function image
+      - name: Update Lambda Image
         run: |
           aws lambda update-function-code \
             --function-name $LAMBDA_FUNCTION \
-            --image-uri ${{ needs.build.outputs.image_uri }} \
-            --region $AWS_REGION
+            --image-uri ${{ needs.build.outputs.image_uri }}
 
-      - name: Wait for Lambda update to complete
-        run: |
-          aws lambda wait function-updated \
-            --function-name $LAMBDA_FUNCTION \
-            --region $AWS_REGION
-
-      - name: Update Lambda environment variables
+      - name: Wait for update
+        run: aws lambda wait function-updated --function-name $LAMBDA_FUNCTION
+      
+      
+      - name: Set Environment Variables
         run: |
           aws lambda update-function-configuration \
             --function-name $LAMBDA_FUNCTION \
-            --region $AWS_REGION \
-            --environment "Variables={
-              OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }},
-              ALPHA_VANTAGE_API_KEY=${{ secrets.ALPHA_VANTAGE_API_KEY }},
-              NEWS_API_KEY=${{ secrets.NEWS_API_KEY }},
-              MONGO_URI=${{ secrets.MONGO_URI }},
-              REDIS_URL=${{ secrets.REDIS_URL }},
-              MONGO_DB_NAME=aira,
-              MODEL_SIMPLE=gpt-4o-mini,
-              MODEL_COMPLEX=gpt-4o
-            }"
+            --environment "Variables={OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }},ALPHA_VANTAGE_API_KEY=${{ secrets.ALPHA_VANTAGE_API_KEY }},NEWS_API_KEY=${{ secrets.NEWS_API_KEY }},MONGO_URI=${{ secrets.MONGO_URI }},REDIS_URL=${{ secrets.REDIS_URL }},MONGO_DB_NAME=aira,MODEL_SIMPLE=gpt-4o-mini,MODEL_COMPLEX=gpt-4o}"
 
-      - name: Wait for config update to complete
+
+      
+      
+
+      - name: Set Performance Config
         run: |
-          aws lambda wait function-updated \
+          aws lambda update-function-configuration \
             --function-name $LAMBDA_FUNCTION \
-            --region $AWS_REGION
+            --memory-size 1536 \
+            --timeout 30
 
-      - name: Publish new Lambda version
-        id: publish
-        run: |
-          VERSION=$(aws lambda publish-version \
-            --function-name $LAMBDA_FUNCTION \
-            --region $AWS_REGION \
-            --query 'Version' \
-            --output text)
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Published Lambda version: $VERSION"
+      - name: Wait for config update
+        run: aws lambda wait function-updated --function-name $LAMBDA_FUNCTION
 
-      - name: Smoke test — health check
+      - name: Health Check
         run: |
-          # Get the Lambda Function URL (set this up once in AWS console)
           FUNCTION_URL="${{ secrets.LAMBDA_FUNCTION_URL }}"
+          for i in {1..5}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$FUNCTION_URL/api/v1/health")
+            if [ "$STATUS" = "200" ]; then
+              echo "Health check passed"
+              exit 0
+            fi
+            echo "Retrying in 5s..."
+            sleep 5
+          done
+          echo "Health check failed"
+          exit 1
 
-          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
-            --max-time 30 \
-            "$FUNCTION_URL/api/v1/health")
+# ── Job 4: Deploy Frontend (Vercel) ───────────────────────
+  frontend:
+    name: Deploy Frontend (Vercel)
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Vercel CLI
+        run: npm install -g vercel
 
-          if [ "$RESPONSE" != "200" ]; then
-            echo "Health check failed with status $RESPONSE"
-            exit 1
-          fi
-
-          echo "Health check passed (HTTP $RESPONSE)"
-
-      - name: Notify success
-        if: success()
+      - name: Deploy Frontend
         run: |
-          echo "Deployment complete"
-          echo "Function: $LAMBDA_FUNCTION"
-          echo "Version:  ${{ steps.publish.outputs.version }}"
-          echo "Image:    ${{ needs.build.outputs.image_uri }}"
-
-      - name: Rollback on failure
-        if: failure()
-        run: |
-          echo "Deploy failed — rolling back to previous version"
-          aws lambda update-alias \
-            --function-name $LAMBDA_FUNCTION \
-            --name live \
-            --routing-config AdditionalVersionWeights={} \
-            --region $AWS_REGION || echo "No alias to rollback"
+          cd frontend
+          vercel --prod \
+            --token=${{ secrets.VERCEL_TOKEN }} \
+            --env NEXT_PUBLIC_API_URL=${{ secrets.LAMBDA_FUNCTION_URL }} \
+            --yes

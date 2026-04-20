@@ -6,6 +6,8 @@ Skips the LLM entirely — the biggest cost saver.
 """
 import json
 import hashlib
+from datetime import datetime, date
+
 import numpy as np
 from loguru import logger
 from app.core.config import settings
@@ -26,6 +28,33 @@ except ImportError:
     EMBED_AVAILABLE = False
     logger.warning("[cache] sentence-transformers not installed — semantic cache disabled")
 
+try:
+    from bson import ObjectId
+    BSON_AVAILABLE = True
+except ImportError:
+    ObjectId = None
+    BSON_AVAILABLE = False
+
+
+# ── JSON encoder ──────────────────────────────────────────────────────────────
+
+class _CacheEncoder(json.JSONEncoder):
+    """Handles types that standard json can't serialize."""
+    def default(self, obj):
+        if BSON_AVAILABLE and isinstance(obj, ObjectId):
+            return str(obj)
+        if isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        if isinstance(obj, float) and (np.isnan(obj) or np.isinf(obj)):
+            return None  # Redis can't store NaN/Inf either
+        return super().default(obj)
+
+
+def _dumps(obj) -> str:
+    return json.dumps(obj, cls=_CacheEncoder)
+
+
+# ── Embedding helpers ─────────────────────────────────────────────────────────
 
 def _embed(text: str) -> list[float]:
     if not EMBED_AVAILABLE:
@@ -42,6 +71,8 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return float(np.dot(va, vb) / denom) if denom else 0.0
 
 
+# ── Cache ─────────────────────────────────────────────────────────────────────
+
 class SemanticCache:
     """
     Redis-backed semantic cache.
@@ -50,13 +81,13 @@ class SemanticCache:
     Index key:   aira:cache:index  — SET of all cache keys for similarity scan
     """
 
-    PREFIX = "aira:cache:"
+    PREFIX    = "aira:cache:"
     INDEX_KEY = "aira:cache:index"
 
     def __init__(self):
-        self._redis = None
+        self._redis     = None
         self._threshold = settings.CACHE_SIMILARITY_THRESHOLD
-        self._ttl = settings.CACHE_TTL_SECONDS
+        self._ttl       = settings.CACHE_TTL_SECONDS
 
     async def _get_redis(self):
         if self._redis is None and REDIS_AVAILABLE:
@@ -82,7 +113,7 @@ class SemanticCache:
         if not r or not EMBED_AVAILABLE:
             return None
 
-        query_vec = _embed(query)
+        query_vec  = _embed(query)
         index_keys = await r.smembers(self.INDEX_KEY)
 
         best_score, best_entry = 0.0, None
@@ -91,7 +122,7 @@ class SemanticCache:
             if not raw:
                 continue
             try:
-                entry = json.loads(raw)
+                entry = json.loads(raw)          # plain json.loads is fine on read
                 sim   = _cosine_similarity(query_vec, entry["embedding"])
                 if sim > best_score:
                     best_score, best_entry = sim, entry
@@ -103,8 +134,8 @@ class SemanticCache:
                 f"[cache] HIT  sim={best_score:.3f} "
                 f"(threshold={self._threshold}) query={query[:50]!r}"
             )
-            best_entry["result"]["_cache_hit"]  = True
-            best_entry["result"]["_cache_sim"]  = round(best_score, 3)
+            best_entry["result"]["_cache_hit"] = True
+            best_entry["result"]["_cache_sim"] = round(best_score, 3)
             return best_entry["result"]
 
         logger.info(f"[cache] MISS sim={best_score:.3f} query={query[:50]!r}")
@@ -121,7 +152,7 @@ class SemanticCache:
         entry     = {"query": query, "embedding": query_vec, "result": result, "tier": tier}
 
         try:
-            await r.set(key, json.dumps(entry), ex=self._ttl)
+            await r.set(key, _dumps(entry), ex=self._ttl)   # ← _dumps instead of json.dumps
             await r.sadd(self.INDEX_KEY, key)
             await r.expire(self.INDEX_KEY, self._ttl)
             logger.info(f"[cache] SET  tier={tier} key={key[-8:]} query={query[:50]!r}")
@@ -134,7 +165,7 @@ class SemanticCache:
         if not r:
             return 0
 
-        removed = 0
+        removed    = 0
         index_keys = await r.smembers(self.INDEX_KEY)
         for key in index_keys:
             raw = await r.get(key)

@@ -98,7 +98,7 @@ async def save_analysis(analysis_dict: dict) -> None:
     db = MongoDB.get_db()
     if db is None:
         return
-    await db.analysis.insert_one(analysis_dict)
+    await db.analysis.insert_one({**analysis_dict})  
 
 
 async def get_recent_analysis(ticker: str) -> dict | None:
@@ -116,5 +116,4 @@ async def log_agent_call(entry: dict) -> None:
     db = MongoDB.get_db()
     if db is None:
         return
-    entry["logged_at"] = datetime.utcnow()
-    await db.agent_logs.insert_one(entry)
+    await db.agent_logs.insert_one({**entry, "logged_at": datetime.utcnow()})

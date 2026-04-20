@@ -1,7 +1,11 @@
 from pydantic import BaseModel, Field, field_validator
-from typing import List, Optional
-from datetime import datetime
 
+from datetime import datetime
+import loguru
+
+from typing import List, Literal, Optional
+
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 class FinancialMetric(BaseModel):
     label: str = Field(..., description="Metric name, e.g. P/E Ratio, Revenue")
@@ -38,9 +42,11 @@ class StockAnalysis(BaseModel):
     company_name: str
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     summary: str = Field(..., description="Executive overview, max 3 sentences")
-    metrics: List[FinancialMetric]
-    top_news: List[NewsReference]
-    risk_level: str = Field(..., description="Low | Medium | High | Extreme")
+    metrics: List[FinancialMetric] = Field(default_factory=list)
+    top_news: List[NewsReference] = Field(default_factory=list)
+    risk_level: Literal["Low", "Medium", "High", "Extreme"] = Field(
+        ..., description="Low | Medium | High | Extreme"
+    )
     confidence_score: float = Field(
         ..., ge=0, le=1,
         description="AI confidence in analysis based on data coverage"
@@ -54,18 +60,52 @@ class StockAnalysis(BaseModel):
     )
     model_tier: Optional[str] = None  # simple | moderate | complex — set by router
 
-    @field_validator("risk_level")
+    # --- Validators ---
+
+    @field_validator("ticker", mode="before")
     @classmethod
-    def validate_risk(cls, v):
+    def uppercase_ticker(cls, v: str) -> str:
+        return v.upper().strip()
+
+    @field_validator("risk_level", mode="before")
+    @classmethod
+    def coerce_risk_level(cls, v: str) -> str:
         allowed = {"Low", "Medium", "High", "Extreme"}
         if v not in allowed:
-            raise ValueError(f"risk_level must be one of {allowed}")
+            logger.warning(
+                "[analyst] Invalid risk_level from LLM: %r — defaulting to 'Medium'", v
+            )
+            return "Medium"
         return v
 
-    @field_validator("ticker")
+    @field_validator("confidence_score", mode="before")
     @classmethod
-    def uppercase_ticker(cls, v):
-        return v.upper().strip()
+    def clamp_confidence(cls, v: float) -> float:
+        # LLM sometimes returns values slightly out of range e.g. 1.02
+        return max(0.0, min(1.0, float(v)))
+
+    @model_validator(mode="after")
+    def low_confidence_when_no_data(self) -> "StockAnalysis":
+        # If LLM had no real data, cap confidence and flag it
+        has_metrics = bool(self.metrics)
+        has_news = bool(self.top_news)
+        if not has_metrics and not has_news and self.confidence_score > 0.4:
+            logger.warning(
+                "[analyst] No metrics or news for %s but confidence=%.2f — clamping to 0.3",
+                self.ticker, self.confidence_score
+            )
+            self.confidence_score = 0.3
+        return self
+
+    # --- Convenience ---
+
+    @property
+    def is_low_confidence(self) -> bool:
+        return self.confidence_score < 0.4
+
+    @property
+    def has_sufficient_data(self) -> bool:
+        return bool(self.metrics) or bool(self.top_news)
 
 
 class ComparisonAnalysis(BaseModel):

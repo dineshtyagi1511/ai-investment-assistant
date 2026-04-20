@@ -13,6 +13,14 @@ services:
       - ./data:/app/data
     restart: unless-stopped
 
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - app
+    restart: unless-stopped
+
   mongo:
     image: mongo:7
     ports:
